@@ -11,7 +11,7 @@
   :root{
     --bg:#14161a; --panel:#1b1e24; --line:#2b2f38;
     --text:#e9e7e0; --dim:#8b8f99;
-    --stone:#8fb8e8; --soil:#c08a4a; --back:#4a4f5a;
+    --stone:#25aff4; --soil:#a7dd3c; --back:#f04cba;
     --accent:#d7ff4e;
     --mono:"SF Mono",ui-monospace,Menlo,Consolas,monospace;
     --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
@@ -320,7 +320,8 @@
   /* ---------------- render ---------------- */
 
   // class colours indexed 0=low band, 1=mid band, 2=high band get remapped by mode
-  var COL={ stone:[143,184,232], soil:[192,138,74], back:[74,79,90] };
+  // triadic: hue 200 / 80 / 320
+  var COL={ stone:[37,175,244], soil:[167,221,60], back:[240,76,186] };
 
   function roles(){
     // returns colour+role for [lowBand, midBand, highBand]
@@ -337,7 +338,7 @@
     var r=roles();
     var out=segCtx.createImageData(cropW,cropH);
     var od=out.data, sd=cropRGBA.data;
-    var mix=overlay?0.55:1.0, keep=1-mix;
+    var mix=overlay?0.55:1.0;
 
     var cnt={stone:0, soil:0, back:0};
     var colOf=[COL[r[0]],COL[r[1]],COL[r[2]]];
@@ -348,9 +349,12 @@
       var g=cropGray[p];
       var band = g<a ? 0 : (g<b ? 1 : 2);
       var c=colOf[band];
-      od[i]   = (sd[i]  *keep + c[0]*mix)|0;
-      od[i+1] = (sd[i+1]*keep + c[1]*mix)|0;
-      od[i+2] = (sd[i+2]*keep + c[2]*mix)|0;
+      // background is painted flat — no photo texture — so it can never be
+      // mistaken for a material class at a glance
+      var m = keyOf[band]==='back' ? 1 : mix, k = 1-m;
+      od[i]   = (sd[i]  *k + c[0]*m)|0;
+      od[i+1] = (sd[i+1]*k + c[1]*m)|0;
+      od[i+2] = (sd[i+2]*k + c[2]*m)|0;
       od[i+3] = 255;
       cnt[keyOf[band]]++;
     }
@@ -379,7 +383,7 @@
     var max=0; for (var i=0;i<256;i++) if (hist[i]>max) max=hist[i];
     if (!max) return;
     if (a===undefined){ a=+t1El.value; b=+t2El.value; }
-    var r=roles(), colors={stone:'#8fb8e8', soil:'#c08a4a', back:'#4a4f5a'};
+    var r=roles(), colors={stone:'#25aff4', soil:'#a7dd3c', back:'#f04cba'};
     for (var x=0;x<256;x++){
       var band = x<a ? 0 : (x<b ? 1 : 2);
       g.fillStyle=colors[r[band]];
