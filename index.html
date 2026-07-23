@@ -98,6 +98,34 @@
   .toggleRow input{width:16px; height:16px;}
   footer{margin-top:22px; font-size:11px; color:#565a63; line-height:1.6;}
   #empty{color:var(--dim); font-size:13px; line-height:1.6; padding:18px 2px;}
+
+  /* ---- mode switch ---- */
+  .modeSw{display:inline-flex; border:1px solid var(--line); border-radius:9px; overflow:hidden;}
+  .modeSw button{appearance:none; border:0; background:var(--panel); color:var(--dim);
+    padding:8px 13px; font:600 12.5px var(--sans); cursor:pointer;}
+  .modeSw button.on{background:var(--accent); color:#14161a;}
+
+  /* ---- eyedropper controls ---- */
+  #threshCtrls.off{display:none;}
+  #dropCtrls{display:none; margin-top:14px;}
+  #dropCtrls.on{display:block;}
+  .chips{display:flex; gap:6px; margin-bottom:10px;}
+  .chip{flex:1; display:flex; align-items:center; justify-content:center; gap:6px;
+    padding:9px 6px; border:1px solid var(--line); border-radius:9px; background:var(--panel);
+    color:var(--dim); font-size:12.5px; font-weight:600; cursor:pointer;}
+  .chip.on{color:var(--text); border-color:var(--text);}
+  .chip .swatch{width:10px; height:10px; border-radius:3px;}
+
+  /* ---- draggable markers ---- */
+  #origWrap{position:relative;}
+  #markers{position:absolute; inset:0; pointer-events:none;}
+  #markers.off{display:none;}
+  .drop{position:absolute; width:26px; height:26px; margin:-13px 0 0 -13px; border-radius:50%;
+    border:3px solid #fff; box-shadow:0 0 0 1.5px rgba(0,0,0,.55), 0 1px 4px rgba(0,0,0,.5);
+    pointer-events:auto; cursor:grab; touch-action:none; background:rgba(0,0,0,.12);}
+  .drop::after{content:''; position:absolute; left:50%; top:50%; width:3px; height:3px;
+    margin:-1.5px; border-radius:50%; background:#fff; box-shadow:0 0 0 1px rgba(0,0,0,.6);}
+  .drop.sel{outline:2px solid var(--accent); outline-offset:2px; cursor:grabbing;}
 </style>
 </head>
 <body>
@@ -129,12 +157,19 @@
   <div id="work">
     <div id="panes">
       <div class="pane">
-        <canvas id="origCanvas"></canvas>
+        <div id="origWrap"><canvas id="origCanvas"></canvas><div id="markers" class="off"></div></div>
         <div class="cap">Original</div>
       </div>
       <div class="pane">
         <canvas id="segCanvas"></canvas>
         <div class="cap">Threshold</div>
+      </div>
+    </div>
+
+    <div style="display:flex; justify-content:center; margin:14px 0 2px;">
+      <div class="modeSw">
+        <button id="modeThresh" class="on">Threshold</button>
+        <button id="modeDrop">Eyedropper</button>
       </div>
     </div>
 
@@ -155,6 +190,7 @@
     </div>
 
     <div id="sliders">
+     <div id="threshCtrls">
       <div id="histWrap"><canvas id="hist"></canvas></div>
 
       <div class="ctrlRow">
@@ -173,6 +209,20 @@
         <input type="checkbox" id="brightBack" checked>
         <label for="brightBack">Background is the <b>bright</b> band (foil / white tray). Untick if background is darkest.</label>
       </div>
+     </div>
+
+     <div id="dropCtrls">
+      <div class="chips">
+        <div class="chip on" data-cat="stone"><span class="swatch" style="background:var(--stone)"></span>Stone</div>
+        <div class="chip" data-cat="soil"><span class="swatch" style="background:var(--soil)"></span>Soil</div>
+        <div class="chip" data-cat="back"><span class="swatch" style="background:var(--back)"></span>Background</div>
+      </div>
+      <div style="display:flex; gap:8px;">
+        <button class="btn small" id="addDrop">+ Add eyedropper</button>
+        <button class="btn small" id="delDrop">Remove selected</button>
+      </div>
+      <p class="note">Drag each dropper onto a patch of its material. Pick a category above, then <b>Add</b> to place more samples — stack several on varied stone or soil for a better match. Pixels are classified to the nearest sampled colour (hue + brightness). Double-tap a dropper to delete it.</p>
+     </div>
     </div>
 
     <div id="actions">
@@ -196,6 +246,9 @@
   var brightBack=$('brightBack'), histCanvas=$('hist');
   var stonePctEl=$('stonePct'), soilPctEl=$('soilPct'), backPctEl=$('backPct');
   var barStone=$('barStone'), barSoil=$('barSoil');
+  var markersEl=$('markers'), threshCtrls=$('threshCtrls'), dropCtrls=$('dropCtrls');
+  var histWrap=$('histWrap'), autoBtn=$('autoBtn');
+  var modeThreshBtn=$('modeThresh'), modeDropBtn=$('modeDrop');
 
   var cropCtx=cropCanvas.getContext('2d',{willReadFrequently:true});
   var origCtx=origCanvas.getContext('2d');
@@ -208,8 +261,14 @@
   var fullW=0, fullH=0, fullData=null;
   var cropGray=null, cropRGBA=null, cropW=0, cropH=0;
   var hist=new Uint32Array(256);
+  var cropLab=null;                 // Float32Array 3*n : L,a,b per pixel
   var overlay=true;
   var drag=null;
+
+  var mode='thresh';                // 'thresh' | 'drop'
+  var markers=[];                   // {id,cat,x,y,el} in crop-pixel coords
+  var activeCat='stone';
+  var selMarker=null, dragMk=null, uid=0, rafPending=false;
 
   /* ---------------- load ---------------- */
 
@@ -283,19 +342,39 @@
 
     var d=cropRGBA.data, n=cropW*cropH;
     cropGray=new Uint8Array(n);
+    cropLab=new Float32Array(n*3);
     hist.fill(0);
     for (var i=0,p=0; p<n; i+=4,p++){
       // Rec.601 luma
       var g=(0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2])|0;
       cropGray[p]=g; hist[g]++;
+      var lab=rgb2lab(d[i],d[i+1],d[i+2]);
+      cropLab[p*3]=lab[0]; cropLab[p*3+1]=lab[1]; cropLab[p*3+2]=lab[2];
     }
 
+    seedMarkers();
     cropStep.classList.remove('on');
     work.classList.add('on');
     auto();
     drawHist();
     render();
     window.scrollTo(0,0);
+  }
+
+  /* -------------- CIELAB -------------- */
+
+  function rgb2lab(r,g,b){
+    r/=255; g/=255; b/=255;
+    r = r>0.04045 ? Math.pow((r+0.055)/1.055,2.4) : r/12.92;
+    g = g>0.04045 ? Math.pow((g+0.055)/1.055,2.4) : g/12.92;
+    b = b>0.04045 ? Math.pow((b+0.055)/1.055,2.4) : b/12.92;
+    var x=(r*0.4124+g*0.3576+b*0.1805)/0.95047;
+    var y=(r*0.2126+g*0.7152+b*0.0722);
+    var z=(r*0.0193+g*0.1192+b*0.9505)/1.08883;
+    x = x>0.008856 ? Math.cbrt(x) : 7.787*x + 0.137931;
+    y = y>0.008856 ? Math.cbrt(y) : 7.787*y + 0.137931;
+    z = z>0.008856 ? Math.cbrt(z) : 7.787*z + 0.137931;
+    return [116*y-16, 500*(x-y), 200*(y-z)];
   }
 
   /* ------------- 2-threshold Otsu ------------- */
@@ -330,36 +409,18 @@
       : ['back','soil','stone'];    // dark=background, mid=soil, bright=stone
   }
 
-  function render(){
-    if (!cropGray) return;
-    var a=+t1El.value, b=+t2El.value;
-    if (a>b){ var t=a; a=b; b=t; }
+  // shared: paint one class into the seg buffer + tally, then push stats
+  function paintPixel(od,sd,i,key){
+    var c=COL[key];
+    // background painted flat — no photo texture — so it never reads as material
+    var m = key==='back' ? 1 : (overlay?0.55:1.0), k = 1-m;
+    od[i]   = (sd[i]  *k + c[0]*m)|0;
+    od[i+1] = (sd[i+1]*k + c[1]*m)|0;
+    od[i+2] = (sd[i+2]*k + c[2]*m)|0;
+    od[i+3] = 255;
+  }
 
-    var r=roles();
-    var out=segCtx.createImageData(cropW,cropH);
-    var od=out.data, sd=cropRGBA.data;
-    var mix=overlay?0.55:1.0;
-
-    var cnt={stone:0, soil:0, back:0};
-    var colOf=[COL[r[0]],COL[r[1]],COL[r[2]]];
-    var keyOf=[r[0],r[1],r[2]];
-    var n=cropW*cropH;
-
-    for (var p=0,i=0; p<n; p++,i+=4){
-      var g=cropGray[p];
-      var band = g<a ? 0 : (g<b ? 1 : 2);
-      var c=colOf[band];
-      // background is painted flat — no photo texture — so it can never be
-      // mistaken for a material class at a glance
-      var m = keyOf[band]==='back' ? 1 : mix, k = 1-m;
-      od[i]   = (sd[i]  *k + c[0]*m)|0;
-      od[i+1] = (sd[i+1]*k + c[1]*m)|0;
-      od[i+2] = (sd[i+2]*k + c[2]*m)|0;
-      od[i+3] = 255;
-      cnt[keyOf[band]]++;
-    }
-    segCtx.putImageData(out,0,0);
-
+  function applyCounts(cnt,n){
     var mat=cnt.stone+cnt.soil;
     var sp=mat?100*cnt.stone/mat:0, lp=mat?100*cnt.soil/mat:0;
     stonePctEl.textContent = mat? sp.toFixed(1)+'%' : '—';
@@ -367,6 +428,32 @@
     backPctEl.textContent  = (100*cnt.back/n).toFixed(0)+'% of crop';
     barStone.style.width=sp+'%';
     barSoil.style.width=lp+'%';
+  }
+
+  function render(){
+    if (!cropGray) return;
+    if (mode==='drop') renderDropper(); else renderThreshold();
+  }
+
+  function renderThreshold(){
+    var a=+t1El.value, b=+t2El.value;
+    if (a>b){ var t=a; a=b; b=t; }
+
+    var r=roles();
+    var out=segCtx.createImageData(cropW,cropH);
+    var od=out.data, sd=cropRGBA.data;
+    var cnt={stone:0, soil:0, back:0};
+    var keyOf=[r[0],r[1],r[2]];
+    var n=cropW*cropH;
+
+    for (var p=0,i=0; p<n; p++,i+=4){
+      var g=cropGray[p];
+      var key = keyOf[ g<a ? 0 : (g<b ? 1 : 2) ];
+      paintPixel(od,sd,i,key);
+      cnt[key]++;
+    }
+    segCtx.putImageData(out,0,0);
+    applyCounts(cnt,n);
 
     v1.textContent=a; v2.textContent=b;
     var names={stone:'Stone', soil:'Soil', back:'Background'};
@@ -374,6 +461,110 @@
     lbl2.textContent=names[r[1]]+' / '+names[r[2]];
     drawHist(a,b);
   }
+
+  function renderDropper(){
+    var out=segCtx.createImageData(cropW,cropH);
+    var od=out.data, sd=cropRGBA.data;
+    var cnt={stone:0, soil:0, back:0};
+    var n=cropW*cropH;
+
+    if (!markers.length){ segCtx.putImageData(out,0,0); applyCounts(cnt,n); return; }
+
+    // sample each marker's Lab once
+    var m=markers.length, ML=new Float64Array(m*3), MK=new Array(m);
+    for (var j=0;j<m;j++){ var s=sampleLab(markers[j].x,markers[j].y);
+      ML[j*3]=s[0]; ML[j*3+1]=s[1]; ML[j*3+2]=s[2]; MK[j]=markers[j].cat; }
+
+    for (var p=0,i=0; p<n; p++,i+=4){
+      var L=cropLab[p*3], A=cropLab[p*3+1], B=cropLab[p*3+2];
+      var best=1e18, bj=0;
+      for (var j2=0;j2<m;j2++){
+        var dL=L-ML[j2*3], dA=A-ML[j2*3+1], dB=B-ML[j2*3+2];
+        var d=dL*dL+dA*dA+dB*dB;
+        if (d<best){ best=d; bj=j2; }
+      }
+      var key=MK[bj];
+      paintPixel(od,sd,i,key);
+      cnt[key]++;
+    }
+    segCtx.putImageData(out,0,0);
+    applyCounts(cnt,n);
+  }
+
+  // average Lab over a small window for a stable sample
+  function sampleLab(x,y){
+    x=Math.round(x); y=Math.round(y);
+    var L=0,A=0,B=0,c=0;
+    for (var dy=-1;dy<=1;dy++) for (var dx=-1;dx<=1;dx++){
+      var xx=x+dx, yy=y+dy;
+      if (xx<0||yy<0||xx>=cropW||yy>=cropH) continue;
+      var p=(yy*cropW+xx)*3;
+      L+=cropLab[p]; A+=cropLab[p+1]; B+=cropLab[p+2]; c++;
+    }
+    return c? [L/c,A/c,B/c] : [0,0,0];
+  }
+
+  /* -------------- markers -------------- */
+
+  function seedMarkers(){
+    markers=[]; selMarker=null; uid=0;
+    // one sample per category, spread across the crop; user drags to taste
+    add(cropW*0.30, cropH*0.55, 'soil');
+    add(cropW*0.55, cropH*0.45, 'stone');
+    add(cropW*0.80, cropH*0.25, 'back');
+    function add(x,y,cat){ markers.push({id:uid++,cat:cat,x:x,y:y,el:null}); }
+    buildMarkerEls();
+  }
+
+  function buildMarkerEls(){
+    markersEl.innerHTML='';
+    markers.forEach(function(mk){
+      var el=document.createElement('div');
+      el.className='drop'+(mk===selMarker?' sel':'');
+      el.style.borderColor='rgb('+COL[mk.cat].join(',')+')';
+      el.addEventListener('pointerdown', function(e){ startDrag(e,mk,el); });
+      mk.el=el; markersEl.appendChild(el);
+    });
+    positionMarkers();
+  }
+
+  function positionMarkers(){
+    markers.forEach(function(mk){
+      if(!mk.el) return;
+      mk.el.style.left=(mk.x/cropW*100)+'%';
+      mk.el.style.top =(mk.y/cropH*100)+'%';
+    });
+  }
+
+  function selectMarker(mk){
+    selMarker=mk;
+    markers.forEach(function(o){ if(o.el) o.el.classList.toggle('sel', o===mk); });
+  }
+
+  var lastTap=0, lastTapMk=null;
+  function startDrag(e,mk,el){
+    e.preventDefault();
+    var now=Date.now();
+    if (mk===lastTapMk && now-lastTap<300){   // double-tap kills the marker
+      lastTap=0; lastTapMk=null;
+      markers=markers.filter(function(m){ return m!==mk; });
+      if (selMarker===mk) selMarker=null;
+      buildMarkerEls(); render();
+      return;
+    }
+    lastTap=now; lastTapMk=mk;
+    selectMarker(mk); dragMk=mk;
+    el.setPointerCapture && el.setPointerCapture(e.pointerId);
+  }
+  window.addEventListener('pointermove', function(e){
+    if(!dragMk) return;
+    var r=origCanvas.getBoundingClientRect();
+    dragMk.x=Math.max(0,Math.min(cropW-1,(e.clientX-r.left)/r.width*cropW));
+    dragMk.y=Math.max(0,Math.min(cropH-1,(e.clientY-r.top)/r.height*cropH));
+    positionMarkers();
+    if(!rafPending){ rafPending=true; requestAnimationFrame(function(){ rafPending=false; render(); }); }
+  });
+  window.addEventListener('pointerup', function(){ dragMk=null; });
 
   function drawHist(a,b){
     var W=histCanvas.clientWidth||300, H=46;
@@ -397,10 +588,50 @@
 
   /* ---------------- controls ---------------- */
 
+  function setMode(m){
+    mode=m;
+    var drop = m==='drop';
+    modeThreshBtn.classList.toggle('on', !drop);
+    modeDropBtn.classList.toggle('on', drop);
+    threshCtrls.classList.toggle('off', drop);
+    dropCtrls.classList.toggle('on', drop);
+    markersEl.classList.toggle('off', !drop);
+    autoBtn.style.display = drop ? 'none' : '';
+    if (drop) positionMarkers();
+    render();
+  }
+  modeThreshBtn.addEventListener('click', function(){ setMode('thresh'); });
+  modeDropBtn.addEventListener('click', function(){ setMode('drop'); });
+
+  // category chips
+  Array.prototype.forEach.call(dropCtrls.querySelectorAll('.chip'), function(chip){
+    chip.addEventListener('click', function(){
+      activeCat=chip.getAttribute('data-cat');
+      Array.prototype.forEach.call(dropCtrls.querySelectorAll('.chip'), function(c){
+        c.classList.toggle('on', c===chip);
+      });
+    });
+  });
+
+  $('addDrop').addEventListener('click', function(){
+    if(!cropGray) return;
+    markers.push({id:uid++, cat:activeCat, x:cropW/2, y:cropH/2, el:null});
+    buildMarkerEls();
+    selectMarker(markers[markers.length-1]);
+    render();
+  });
+  $('delDrop').addEventListener('click', function(){
+    if(!selMarker) return;
+    markers=markers.filter(function(m){ return m!==selMarker; });
+    selMarker=null;
+    buildMarkerEls();
+    render();
+  });
+
   t1El.addEventListener('input', render);
   t2El.addEventListener('input', render);
   brightBack.addEventListener('change', render);
-  $('autoBtn').addEventListener('click', function(){ auto(); render(); });
+  autoBtn.addEventListener('click', function(){ auto(); render(); });
   $('recropBtn').addEventListener('click', function(){
     work.classList.remove('on'); cropStep.classList.add('on'); window.scrollTo(0,0);
   });
@@ -409,7 +640,7 @@
     this.textContent='Overlay: '+(overlay?'on':'off');
     render();
   });
-  window.addEventListener('resize', function(){ if (cropGray) drawHist(); });
+  window.addEventListener('resize', function(){ if (cropGray){ drawHist(); positionMarkers(); } });
 })();
 </script>
 </body>
